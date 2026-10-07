@@ -55,6 +55,7 @@ export function getLastCutoffDate(cutoffDay, from = new Date()) {
   const month = today.getMonth();
   const thisCutoff = cutoffInMonth(year, month, cutoffDay);
 
+  // Al llegar o superar el día de corte, el acumulado abierto pasa a ser el corte facturado.
   if (today >= thisCutoff) return thisCutoff;
 
   const prevMonth = month - 1;
@@ -96,6 +97,11 @@ export function formatShortDate(date) {
     day: "numeric",
     month: "short",
   }).format(date);
+}
+
+export function formatDateRange(from, to) {
+  if (!from || !to) return "";
+  return `${formatShortDate(from)} – ${formatShortDate(to)}`;
 }
 
 export function getCardCycle(cutoffDay, paymentDueDays, from = new Date()) {

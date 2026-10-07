@@ -1,5 +1,6 @@
 import { ReceiptText } from "lucide-react";
 import { formatExpenseDate } from "../../utils/expenses";
+import { CategoryAccordionList } from "./CategoryAccordionItem";
 import ExpenseItem from "./ExpenseItem";
 
 export default function ExpenseList({
@@ -9,18 +10,14 @@ export default function ExpenseList({
   loading,
   emptyText = "Registra un gasto, MSI o adelanto para verlo en este feed.",
   emptyAction,
-  onEdit,
+  allocationById,
+  settled = false,
+  groupMode = "date",
+  groups = [],
+  onOpenActions,
   onAdvance,
   onToggleStatus,
-  onDelete,
 }) {
-  const grouped = expenses.reduce((groups, expense) => {
-    const key = expense.purchaseDate || "sin-fecha";
-    groups[key] = groups[key] || [];
-    groups[key].push(expense);
-    return groups;
-  }, {});
-
   const accountMap = Object.fromEntries(accounts.map((account) => [account.id, account]));
 
   if (loading) {
@@ -51,6 +48,55 @@ export default function ExpenseList({
     );
   }
 
+  if (groupMode === "category") {
+    return (
+      <CategoryAccordionList groups={groups} categories={categories}>
+        {(group) =>
+          group.items.map((expense) => (
+            <ExpenseItem
+              key={expense.id}
+              expense={expense}
+              account={accountMap[expense.accountId]}
+              categories={categories}
+              allocation={allocationById?.[expense.id]}
+              locked={settled && Boolean(allocationById?.[expense.id])}
+              onOpenActions={onOpenActions}
+              onAdvance={onAdvance}
+              onToggleStatus={onToggleStatus}
+            />
+          ))
+        }
+      </CategoryAccordionList>
+    );
+  }
+
+  if (groupMode === "none") {
+    return (
+      <div className="space-y-2.5">
+        {expenses.map((expense) => (
+          <ExpenseItem
+            key={expense.id}
+            expense={expense}
+            account={accountMap[expense.accountId]}
+            categories={categories}
+            allocation={allocationById?.[expense.id]}
+            locked={settled && Boolean(allocationById?.[expense.id])}
+            onOpenActions={onOpenActions}
+            onAdvance={onAdvance}
+            onToggleStatus={onToggleStatus}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  const grouped = expenses.reduce((buckets, expense) => {
+    const key = expense.purchaseDate || "sin-fecha";
+    buckets[key] = buckets[key] || [];
+    buckets[key].push(expense);
+    return buckets;
+  }, {});
+
   return (
     <div className="space-y-5">
       {Object.entries(grouped).map(([date, items]) => (
@@ -62,13 +108,14 @@ export default function ExpenseList({
             {items.map((expense) => (
               <ExpenseItem
                 key={expense.id}
-                    expense={expense}
-                    account={accountMap[expense.accountId]}
-                    categories={categories}
-                onEdit={onEdit}
+                expense={expense}
+                account={accountMap[expense.accountId]}
+                categories={categories}
+                allocation={allocationById?.[expense.id]}
+                locked={settled && Boolean(allocationById?.[expense.id])}
+                onOpenActions={onOpenActions}
                 onAdvance={onAdvance}
                 onToggleStatus={onToggleStatus}
-                onDelete={onDelete}
               />
             ))}
           </div>

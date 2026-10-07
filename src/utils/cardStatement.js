@@ -1,4 +1,5 @@
 import {
+  addCalendarDays,
   firstCutoffForPurchase,
   getCardCycle,
   getPaymentDueDate,
@@ -8,6 +9,7 @@ import {
 } from "./cardDates";
 import { formatMonthLabel, paidInstallments, remainingDebt } from "./expenses";
 import { roundMoney, toSafeNumber } from "./numbers";
+import { cycleMonthFromDate } from "./payments";
 import { isExpensePaid } from "./projections";
 
 export function includesCutoffDayInCycle(card) {
@@ -18,16 +20,14 @@ export function firstStatementCutoff(purchaseDate, cutoffDay, includeCutoffDay =
   return firstCutoffForPurchase(purchaseDate, cutoffDay, includeCutoffDay);
 }
 
-function inClosedCycle(purchaseDate, currentCutoff, includeCutoffDay) {
-  return includeCutoffDay ? purchaseDate <= currentCutoff : purchaseDate < currentCutoff;
-}
-
 function inOpenCycle(purchaseDate, currentCutoff, includeCutoffDay) {
   return includeCutoffDay ? purchaseDate > currentCutoff : purchaseDate >= currentCutoff;
 }
 
-export function msiSlotForCutoff(expense, statementCutoff, cutoffDay, includeCutoffDay = false) {
-  if (!expense.isMsi || isExpensePaid(expense)) return null;
+export function msiSlotForCutoff(expense, statementCutoff, cutoffDay, includeCutoffDay = false, options = {}) {
+  if (!expense.isMsi) return null;
+  const scheduledOnly = options.scheduledOnly === true;
+  if (!scheduledOnly && isExpensePaid(expense)) return null;
 
   const purchaseDate = parseLocalDate(expense.purchaseDate);
   if (!purchaseDate) return null;
@@ -42,17 +42,18 @@ export function msiSlotForCutoff(expense, statementCutoff, cutoffDay, includeCut
   const installment = monthsFromFirst + 1;
   const total = Math.max(1, toSafeNumber(expense.totalInstallments, 1));
   const paid = paidInstallments(expense);
+  const inPlan = scheduledOnly
+    ? installment >= 1 && installment <= total
+    : installment > paid && installment <= total;
 
-  if (installment > paid && installment <= total) {
-    return {
-      amount: toSafeNumber(expense.monthlyPayment, 0),
-      installment,
-      total,
-      isLast: installment >= total,
-    };
-  }
+  if (!inPlan) return null;
 
-  return null;
+  return {
+    amount: toSafeNumber(expense.monthlyPayment, 0),
+    installment,
+    total,
+    isLast: installment >= total,
+  };
 }
 
 export function msiInstallmentForCutoff(expense, statementCutoff, cutoffDay, includeCutoffDay = false) {
@@ -67,11 +68,15 @@ export function expenseOutstanding(expenses = [], accountId) {
   );
 }
 
-/** Saldo visible: nunca el currentBalance congelado de Firestore si hay movimientos. */
-export function resolveAccountBalance(account, expenses = []) {
+/** Saldo visible: movimientos pendientes menos abonos, nunca el currentBalance congelado. */
+export function resolveAccountBalance(account, expenses = [], payments = []) {
   const cardExpenses = expenses.filter((expense) => expense.accountId === account.id);
   if (!cardExpenses.length) return roundMoney(toSafeNumber(account.currentBalance, 0));
-  return calculateCardBalances(account, expenses).currentBalance;
+  const statement = calculateCardBalances(account, expenses);
+  const paid = payments
+    .filter((payment) => payment.accountId === account.id)
+    .reduce((sum, payment) => sum + toSafeNumber(payment.amount, 0), 0);
+  return roundMoney(Math.max(0, statement.currentBalance - paid));
 }
 
 function lineItem(expense, amount, extra = {}) {
@@ -103,6 +108,7 @@ export function calculateCardBalances(card, expenses = [], from = new Date()) {
   const previousCutoff = shiftCutoffDate(lastCutoff, cutoffDay, -1);
   const periodStart = previousCutoff;
   const paymentDue = cycle.lastPaymentDue;
+  const cycleMonth = cycleMonthFromDate(lastCutoff);
 
   const cardExpenses = expenses.filter((expense) => expense.accountId === card.id);
   const currentItems = [];
@@ -148,13 +154,29 @@ export function calculateCardBalances(card, expenses = [], from = new Date()) {
           })
         );
       }
+
+      if (expense.advancedCycle === cycleMonth) {
+        const extra = roundMoney(toSafeNumber(expense.advancedCount, 0) * toSafeNumber(expense.monthlyPayment, 0));
+        if (extra > 0) {
+          thisMsi += extra;
+          currentItems.push(
+            lineItem(expense, extra, {
+              kind: "msi",
+              label: `${expense.title} · Adelanto MSI`,
+              isLast: false,
+              installment: paidInstallments(expense),
+              totalInstallments: expense.totalInstallments,
+            })
+          );
+        }
+      }
       return;
     }
 
     if (isExpensePaid(expense)) return;
 
     const amount = toSafeNumber(expense.totalAmount, 0);
-    if (inClosedCycle(purchaseDate, lastCutoff, includeCutoffDay)) {
+    if (cashInStatementWindow(purchaseDate, previousCutoff, lastCutoff, includeCutoffDay)) {
       billedCash += amount;
       currentItems.push(
         lineItem(expense, amount, {
@@ -198,6 +220,7 @@ export function calculateCardBalances(card, expenses = [], from = new Date()) {
     periodStart,
     paymentDue,
     overdue: today > paymentDue,
+    cycleMonth,
     currentBalance,
     currentDue,
     currentCash: billedCash,
@@ -217,11 +240,86 @@ export function getCardStatementSummary(account, expenses = [], from = new Date(
   return calculateCardBalances(account, expenses, from);
 }
 
-function cashInStatementWindow(purchaseDate, previousCutoff, statementCutoff, includeCutoffDay) {
+export function cashInStatementWindow(purchaseDate, previousCutoff, statementCutoff, includeCutoffDay) {
   if (includeCutoffDay) {
     return purchaseDate > previousCutoff && purchaseDate <= statementCutoff;
   }
   return purchaseDate >= previousCutoff && purchaseDate < statementCutoff;
+}
+
+export function statementItemsForCutoff(card, expenses = [], statementCutoff) {
+  const includeCutoffDay = includesCutoffDayInCycle(card);
+  const cutoffDay = card.cutoffDay;
+  const previousCutoff = shiftCutoffDate(statementCutoff, cutoffDay, -1);
+  const monthKey = `${statementCutoff.getFullYear()}-${String(statementCutoff.getMonth() + 1).padStart(2, "0")}`;
+  const items = [];
+
+  expenses
+    .filter((expense) => expense.accountId === card.id)
+    .forEach((expense) => {
+      const purchaseDate = parseLocalDate(expense.purchaseDate);
+      if (!purchaseDate) return;
+
+      if (expense.isMsi) {
+        const slot = msiSlotForCutoff(expense, statementCutoff, cutoffDay, includeCutoffDay, {
+          scheduledOnly: true,
+        });
+        if (slot) {
+          items.push(
+            lineItem(expense, slot.amount, {
+              kind: "msi",
+              label: `${expense.title} · Mes ${slot.installment} de ${slot.total}`,
+              isLast: slot.isLast,
+              installment: slot.installment,
+              totalInstallments: slot.total,
+            })
+          );
+        }
+        if (expense.advancedCycle === monthKey) {
+          const extra = roundMoney(toSafeNumber(expense.advancedCount, 0) * toSafeNumber(expense.monthlyPayment, 0));
+          if (extra > 0) {
+            items.push(
+              lineItem(expense, extra, {
+                kind: "msi",
+                label: `${expense.title} · Adelanto MSI`,
+                isLast: false,
+                installment: paidInstallments(expense),
+                totalInstallments: expense.totalInstallments,
+              })
+            );
+          }
+        }
+        return;
+      }
+
+      if (!cashInStatementWindow(purchaseDate, previousCutoff, statementCutoff, includeCutoffDay)) return;
+
+      items.push(
+        lineItem(expense, toSafeNumber(expense.totalAmount, 0), {
+          kind: "cash",
+          label: `${expense.title} · Contado`,
+        })
+      );
+    });
+
+  return items;
+}
+
+export function getStatementWindow(card, statementCutoff) {
+  const includeCutoffDay = includesCutoffDayInCycle(card);
+  const previousCutoff = shiftCutoffDate(statementCutoff, card.cutoffDay, -1);
+  if (includeCutoffDay) {
+    return {
+      previousCutoff,
+      start: addCalendarDays(previousCutoff, 1),
+      end: statementCutoff,
+    };
+  }
+  return {
+    previousCutoff,
+    start: previousCutoff,
+    end: addCalendarDays(statementCutoff, -1),
+  };
 }
 
 function monthsBetweenCutoffs(fromCutoff, toCutoff) {
@@ -281,16 +379,32 @@ export function projectCardCycles(card, expenses = [], horizon = "active", from 
 
       if (expense.isMsi) {
         const slot = msiSlotForCutoff(expense, statementCutoff, cutoffDay, includeCutoffDay);
-        if (!slot) return;
-        items.push(
-          lineItem(expense, slot.amount, {
-            kind: "msi",
-            label: `${expense.title} · Mes ${slot.installment} de ${slot.total}`,
-            isLast: slot.isLast,
-            installment: slot.installment,
-            totalInstallments: slot.total,
-          })
-        );
+        if (slot) {
+          items.push(
+            lineItem(expense, slot.amount, {
+              kind: "msi",
+              label: `${expense.title} · Mes ${slot.installment} de ${slot.total}`,
+              isLast: slot.isLast,
+              installment: slot.installment,
+              totalInstallments: slot.total,
+            })
+          );
+        }
+        const monthKey = `${statementCutoff.getFullYear()}-${String(statementCutoff.getMonth() + 1).padStart(2, "0")}`;
+        if (expense.advancedCycle === monthKey) {
+          const extra = roundMoney(toSafeNumber(expense.advancedCount, 0) * toSafeNumber(expense.monthlyPayment, 0));
+          if (extra > 0) {
+            items.push(
+              lineItem(expense, extra, {
+                kind: "msi",
+                label: `${expense.title} · Adelanto MSI`,
+                isLast: false,
+                installment: paidInstallments(expense),
+                totalInstallments: expense.totalInstallments,
+              })
+            );
+          }
+        }
         return;
       }
 

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatShortDate } from "../../utils/cardDates";
 import { projectCardCycles } from "../../utils/cardStatement";
+import { applyPaymentsToProjections } from "../../utils/payments";
 import { formatMXN } from "../../utils/money";
 import MonthBreakdownModal from "./MonthBreakdownModal";
 
@@ -23,10 +24,15 @@ function readHorizon() {
   return "active";
 }
 
-export default function PaymentTimeline({ account, expenses }) {
+export default function PaymentTimeline({ account, expenses, payments = [], onBreakdownOpenChange }) {
   const scroller = useRef(null);
   const [selected, setSelected] = useState(null);
   const [horizon, setHorizon] = useState(readHorizon);
+
+  useEffect(() => {
+    onBreakdownOpenChange?.(Boolean(selected));
+    return () => onBreakdownOpenChange?.(false);
+  }, [selected, onBreakdownOpenChange]);
 
   useEffect(() => {
     try {
@@ -36,10 +42,21 @@ export default function PaymentTimeline({ account, expenses }) {
     }
   }, [horizon]);
 
-  const cycles = useMemo(
+  const rawProjections = useMemo(
     () => projectCardCycles(account, expenses, horizon),
     [account, expenses, horizon]
   );
+  const cycles = useMemo(
+    () => applyPaymentsToProjections(rawProjections, payments, account.id),
+    [rawProjections, payments, account.id]
+  );
+
+  useEffect(() => {
+    setSelected((current) => {
+      if (!current) return current;
+      return cycles.find((cycle) => cycle.monthKey === current.monthKey) || null;
+    });
+  }, [cycles]);
 
   function scrollByCard(direction) {
     const node = scroller.current;
@@ -109,7 +126,12 @@ export default function PaymentTimeline({ account, expenses }) {
                 Corte {formatShortDate(cycle.statementCutoff)} · Paga {formatShortDate(cycle.paymentDue)}
               </span>
               <p className="mt-auto text-xl font-semibold tracking-tight text-white">{formatMXN(cycle.total)}</p>
-              <span className="mt-1.5 text-[11px] font-medium text-emerald-300/90">Ver desglose →</span>
+              {cycle.gross > cycle.total ? (
+                <span className="mt-1 text-[10px] font-medium text-slate-500 line-through">{formatMXN(cycle.gross)}</span>
+              ) : null}
+              <span className={`mt-1.5 text-[11px] font-medium ${cycle.settled ? "text-emerald-300" : "text-emerald-300/90"}`}>
+                {cycle.settled ? "Liquidado" : "Ver desglose →"}
+              </span>
             </button>
           ))}
         </div>

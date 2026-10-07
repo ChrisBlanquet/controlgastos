@@ -4,7 +4,9 @@ import CardDetailView from "../components/cards/CardDetailView";
 import AddExpenseModal from "../components/expenses/AddExpenseModal";
 import AdvanceModal from "../components/expenses/AdvanceModal";
 import FilterBottomSheet from "../components/expenses/FilterBottomSheet";
+import MovementActionSheet from "../components/expenses/MovementActionSheet";
 import AppLayout from "../components/layout/AppLayout";
+import Toast from "../components/ui/Toast";
 import MetricsView from "../components/metrics/MetricsView";
 import { useAuth } from "../context/AuthContext";
 import { useAccounts } from "../hooks/useAccounts";
@@ -12,10 +14,11 @@ import { useCategories } from "../hooks/useCategories";
 import { useExpenses } from "../hooks/useExpenses";
 import { useIncomes } from "../hooks/useIncomes";
 import { useLoans } from "../hooks/useLoans";
+import { usePayments } from "../hooks/usePayments";
 import { currentMonthValue, matchesMonth } from "../utils/expenses";
 import { countActiveFilters, DEFAULT_HOME_FILTERS, matchesHomeFilters } from "../utils/filters";
 import { setAccountBalance } from "../services/accountService";
-import { resolveAccountBalance } from "../utils/cardStatement";
+import { calculateCardBalances, resolveAccountBalance } from "../utils/cardStatement";
 import { availableCredit } from "../utils/money";
 import { toSafeNumber } from "../utils/numbers";
 import { dueInMonth } from "../utils/projections";
@@ -42,6 +45,8 @@ export default function Dashboard() {
   const { incomes, saveIncome, incomeFor } = useIncomes(user);
   const { loans, loading: loansLoading, error: loansError, totalBalance, addLoan, editLoan, removeLoan, payInstallment } =
     useLoans(user);
+  const { payments, addPayment, removePayment } = usePayments(user);
+  const [savingPayment, setSavingPayment] = useState(false);
 
   const [tab, setTab] = useState("home");
   const [detailId, setDetailId] = useState(null);
@@ -56,15 +61,19 @@ export default function Dashboard() {
   const [homeMonth, setHomeMonth] = useState(currentMonthValue());
   const [homeFilters, setHomeFilters] = useState(DEFAULT_HOME_FILTERS);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [actionExpense, setActionExpense] = useState(null);
+  const [actionAmount, setActionAmount] = useState(null);
+  const [deletingExpense, setDeletingExpense] = useState(false);
+  const [toast, setToast] = useState("");
   const syncedBalances = useRef(new Set());
 
   const displayAccounts = useMemo(
     () =>
       accounts.map((account) => ({
         ...account,
-        currentBalance: resolveAccountBalance(account, expenses),
+        currentBalance: resolveAccountBalance(account, expenses, payments),
       })),
-    [accounts, expenses]
+    [accounts, expenses, payments]
   );
 
   const metrics = useMemo(() => {
@@ -96,7 +105,7 @@ export default function Dashboard() {
       const hasExpenses = expenses.some((expense) => expense.accountId === account.id);
       if (!hasExpenses) return;
 
-      const computed = resolveAccountBalance(account, expenses);
+      const computed = resolveAccountBalance(account, expenses, payments);
       const stored = toSafeNumber(account.currentBalance, 0);
       if (Math.abs(computed - stored) < 0.02) return;
 
@@ -107,7 +116,7 @@ export default function Dashboard() {
         syncedBalances.current.delete(key);
       });
     });
-  }, [accounts, expenses, accountsLoading, expensesLoading]);
+  }, [accounts, expenses, payments, accountsLoading, expensesLoading]);
 
   const activeFilterCount = countActiveFilters(homeFilters);
   const monthIncome = incomeFor(homeMonth);
@@ -176,29 +185,46 @@ export default function Dashboard() {
   }
 
   async function handleExpenseDelete(expense) {
-    const confirmed = window.confirm("¿Eliminar este gasto?");
-    if (!confirmed) return;
-    await removeExpense(expense);
+    setDeletingExpense(true);
+    try {
+      await removeExpense(expense);
+      setToast("Movimiento eliminado");
+    } finally {
+      setDeletingExpense(false);
+    }
+  }
+
+  function openMovementActions(expense, amount) {
+    if (!expense) return;
+    setActionExpense(expense);
+    setActionAmount(amount ?? expense.totalAmount);
   }
 
   async function handleAdvance(expense, count) {
     setSavingAdvance(true);
     try {
-      await advanceExpense(expense, count);
+      const card = accounts.find((account) => account.id === expense.accountId);
+      const cycleMonth = card ? calculateCardBalances(card, expenses).cycleMonth : null;
+      await advanceExpense(expense, count, cycleMonth);
       setAdvancing(null);
     } finally {
       setSavingAdvance(false);
     }
   }
 
+  async function handleAddPayment(payload) {
+    setSavingPayment(true);
+    try {
+      await addPayment(payload);
+    } finally {
+      setSavingPayment(false);
+    }
+  }
+
   const expenseActions = {
-    onEdit: (item) => {
-      setEditingExpense(item);
-      setExpenseModalOpen(true);
-    },
+    onOpenActions: openMovementActions,
     onAdvance: setAdvancing,
     onToggleStatus: toggleStatus,
-    onDelete: handleExpenseDelete,
   };
 
   let content = null;
@@ -208,16 +234,20 @@ export default function Dashboard() {
       <CardDetailView
         account={detailAccount}
         expenses={expenses}
+        payments={payments}
         accounts={displayAccounts}
         categories={categories}
         loading={expensesLoading}
+        savingPayment={savingPayment}
         onBack={() => setDetailId(null)}
         onEditCard={() => openEditCard(detailAccount)}
         onAddExpense={openCreateExpense}
-        onEditExpense={expenseActions.onEdit}
+        onAddPayment={handleAddPayment}
+        onDeletePayment={removePayment}
         onAdvance={expenseActions.onAdvance}
         onToggleStatus={expenseActions.onToggleStatus}
-        onDelete={expenseActions.onDelete}
+        onOpenActions={openMovementActions}
+        overlayOpen={expenseModalOpen || cardModalOpen || Boolean(advancing) || Boolean(actionExpense)}
       />
     );
   } else if (tab === "cards") {
@@ -304,7 +334,7 @@ export default function Dashboard() {
         user={user}
         onLogout={logout}
         onAddExpense={openCreateExpense}
-        showFab={!detailAccount}
+        showFab={!detailAccount && !actionExpense && !expenseModalOpen && !filtersOpen && !advancing}
       >
         {content}
       </AppLayout>
@@ -348,6 +378,22 @@ export default function Dashboard() {
         }}
         onClose={() => setFiltersOpen(false)}
       />
+      <MovementActionSheet
+        open={Boolean(actionExpense)}
+        expense={actionExpense}
+        amount={actionAmount}
+        saving={deletingExpense}
+        onClose={() => {
+          setActionExpense(null);
+          setActionAmount(null);
+        }}
+        onEdit={(item) => {
+          setEditingExpense(item);
+          setExpenseModalOpen(true);
+        }}
+        onDelete={handleExpenseDelete}
+      />
+      {toast ? <Toast message={toast} onDone={() => setToast("")} /> : null}
     </>
   );
 }

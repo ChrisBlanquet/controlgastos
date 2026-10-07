@@ -52,6 +52,9 @@ export function normalizeExpensePayload(payload) {
     monthlyPayment,
     cashbackEarned: toOptionalNumber(payload.cashbackEarned) ?? 0,
     status: remainingInstallments <= 0 ? "paid" : payload.status === "paid" ? "paid" : "pending",
+    advancedCount: Math.max(0, toSafeNumber(payload.advancedCount, 0)),
+    advancedCycle: payload.advancedCycle ? String(payload.advancedCycle) : null,
+    advanceLocked: Boolean(payload.advanceLocked),
   };
 }
 
@@ -106,17 +109,23 @@ export async function deleteExpense(expense) {
   }
 }
 
-export async function advanceInstallments(expense, count = 1) {
+export async function advanceInstallments(expense, count = 1, cycleMonth) {
   const remaining = toSafeNumber(expense.remainingInstallments, 0);
   const steps = Math.min(remaining, Math.max(1, toSafeNumber(count, 1)));
   if (steps <= 0) return;
 
   const remainingInstallments = remaining - steps;
+  const sameCycle = cycleMonth && expense.advancedCycle === cycleMonth;
+  const advancedCount = (sameCycle ? toSafeNumber(expense.advancedCount, 0) : 0) + steps;
+
   await updateExpense(
     expense.id,
     {
       remainingInstallments,
       status: remainingInstallments <= 0 ? "paid" : "pending",
+      advancedCount,
+      advancedCycle: cycleMonth || expense.advancedCycle || null,
+      advanceLocked: true,
     },
     expense
   );

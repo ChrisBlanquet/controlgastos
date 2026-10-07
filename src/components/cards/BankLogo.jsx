@@ -42,7 +42,7 @@ export function Chip() {
   const chipId = useId().replace(/:/g, "");
 
   return (
-    <svg viewBox="0 0 50 38" className="h-8 w-10 drop-shadow" aria-hidden="true">
+    <svg viewBox="0 0 50 38" className="h-9 w-12 drop-shadow sm:h-10 sm:w-[3.25rem]" aria-hidden="true">
       <defs>
         <linearGradient id={chipId} x1="0" x2="1" y1="0" y2="1">
           <stop offset="0%" stopColor="#fde68a" />

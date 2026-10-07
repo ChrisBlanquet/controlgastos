@@ -40,13 +40,28 @@ export function useExpenses(user) {
     [user]
   );
 
+  const removeExpense = useCallback(async (expense) => {
+    let previous = [];
+    setExpenses((current) => {
+      previous = current;
+      return current.filter((item) => item.id !== expense.id);
+    });
+    try {
+      await deleteExpense(expense);
+    } catch (err) {
+      setExpenses(previous);
+      setError(err.message || "No se pudo eliminar el gasto.");
+      throw err;
+    }
+  }, []);
+
   return {
     expenses,
     loading,
     error,
     addExpense,
     editExpense: updateExpense,
-    removeExpense: deleteExpense,
+    removeExpense,
     advanceExpense: advanceInstallments,
     toggleStatus: toggleExpenseStatus,
   };

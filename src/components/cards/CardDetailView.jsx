@@ -1,15 +1,47 @@
-import { useMemo, useState } from "react";
-import { ArrowLeft, Pencil, Plus, SlidersHorizontal } from "lucide-react";
-import { formatShortDate } from "../../utils/cardDates";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Pencil, SlidersHorizontal } from "lucide-react";
+import { formatDateRange, formatShortDate, shiftCutoffDate, startOfDay } from "../../utils/cardDates";
 import { currentMonthValue, formatMonthLabel, matchesMonth } from "../../utils/expenses";
-import { calculateCardBalances } from "../../utils/cardStatement";
+import {
+  calculateCardBalances,
+  getStatementWindow,
+  lastCommitmentCycleIndex,
+  statementItemsForCutoff,
+} from "../../utils/cardStatement";
+import { applyPaymentsToStatement } from "../../utils/payments";
+import { persistSortPref, processMovements, readSortPref } from "../../utils/movementSort";
+import AddPaymentModal from "./AddPaymentModal";
+import CardSpeedDial from "./CardSpeedDial";
 import MonthBreakdownModal from "./MonthBreakdownModal";
+import PaymentHistoryList from "./PaymentHistoryList";
 import PaymentTimeline from "./PaymentTimeline";
+import StatementItemList from "./StatementItemList";
 import { availableCredit, formatMXN, utilization, utilizationTone } from "../../utils/money";
 import ExpenseList from "../expenses/ExpenseList";
-import FilterSheet from "../ui/FilterSheet";
+import FilterBottomSheet from "../expenses/FilterBottomSheet";
 import MonthNav from "../ui/MonthNav";
 import CreditCardVisual from "./CreditCardVisual";
+
+const VIEW_KEY = "movement_view_mode";
+
+function readViewMode() {
+  try {
+    const stored = localStorage.getItem(VIEW_KEY);
+    if (stored === "calendar" || stored === "natural") return "calendar";
+    if (stored === "cutoff" || stored === "corte") return "cutoff";
+  } catch {
+    /* ignore */
+  }
+  return "cutoff";
+}
+
+function persistViewMode(mode) {
+  try {
+    localStorage.setItem(VIEW_KEY, mode === "calendar" ? "natural" : "corte");
+  } catch {
+    /* ignore */
+  }
+}
 
 function applyFeedFilter(expense, filter) {
   if (filter === "msi") return Boolean(expense.isMsi);
@@ -18,55 +50,154 @@ function applyFeedFilter(expense, filter) {
   return true;
 }
 
+function applyStatementFilter(item, expense, filter, allocation, settled) {
+  if (filter === "msi") return item.kind === "msi";
+  const paid = settled || allocation?.fullyPaid || expense?.status === "paid" || expense?.remainingInstallments <= 0;
+  if (filter === "pending") return !paid;
+  if (filter === "paid") return paid;
+  return true;
+}
+
 export default function CardDetailView({
   account,
   expenses,
+  payments = [],
   accounts,
   categories,
   loading,
+  savingPayment,
   onBack,
   onEditCard,
   onAddExpense,
-  onEditExpense,
+  onAddPayment,
+  onDeletePayment,
   onAdvance,
   onToggleStatus,
-  onDelete,
+  onOpenActions,
+  overlayOpen = false,
 }) {
   const [month, setMonth] = useState(currentMonthValue());
+  const [viewMode, setViewMode] = useState(readViewMode);
+  const [cycleOffset, setCycleOffset] = useState(0);
   const [filter, setFilter] = useState("all");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [detailCycle, setDetailCycle] = useState(null);
+  const [payOpen, setPayOpen] = useState(false);
+  const [dialOpen, setDialOpen] = useState(false);
+  const [historyTab, setHistoryTab] = useState("movements");
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [sortPref, setSortPref] = useState(readSortPref);
+  const sortBy = sortPref.sortBy;
+  const groupBy = sortPref.groupBy;
+  const userCycled = useRef(false);
+
+  useEffect(() => {
+    persistViewMode(viewMode);
+  }, [viewMode]);
+
+  useEffect(() => {
+    persistSortPref(sortPref);
+  }, [sortPref]);
+
+  useEffect(() => {
+    userCycled.current = false;
+  }, [account.id]);
 
   const statement = useMemo(
     () => calculateCardBalances(account, expenses),
     [account, expenses]
   );
+  const applied = useMemo(
+    () => applyPaymentsToStatement(statement, payments, account.id),
+    [statement, payments, account.id]
+  );
+  const displayBalance = applied.displayBalance;
   const displayAccount = useMemo(
-    () => ({ ...account, currentBalance: statement.currentBalance }),
-    [account, statement.currentBalance]
+    () => ({ ...account, currentBalance: displayBalance }),
+    [account, displayBalance]
   );
   const used = utilization(displayAccount.currentBalance, account.creditLimit);
   const tone = utilizationTone(used);
   const available = availableCredit(displayAccount.currentBalance, account.creditLimit);
+  const remainingDue = applied.remainingCurrent;
+  const cycleCleared = remainingDue <= 0.01;
+  const pastPaymentDue = startOfDay(new Date()) >= startOfDay(statement.paymentDue);
+  const preferOpenCycle = cycleCleared || pastPaymentDue;
+  const currentItems = useMemo(
+    () =>
+      statement.currentItems.map((item) => ({
+        ...item,
+        allocation: applied.allocations.find((row) => row.key === `${item.id}-${item.label}`) || applied.allocationById[item.id],
+      })),
+    [statement.currentItems, applied]
+  );
   const currentCycle = useMemo(
     () => ({
-      label: formatMonthLabel(
-        `${statement.lastCutoff.getFullYear()}-${String(statement.lastCutoff.getMonth() + 1).padStart(2, "0")}`
-      ),
-      total: statement.currentDue,
-      items: statement.currentItems,
+      label: formatMonthLabel(applied.cycleMonth),
+      total: applied.displayCurrentDue,
+      items: currentItems,
+      settled: applied.settled,
     }),
-    [statement]
+    [applied, currentItems]
   );
   const nextCycle = useMemo(
     () => ({
       label: formatMonthLabel(
         `${statement.nextCutoff.getFullYear()}-${String(statement.nextCutoff.getMonth() + 1).padStart(2, "0")}`
       ),
-      total: statement.nextDue,
+      total: applied.displayNextDue,
       items: statement.nextItems,
     }),
-    [statement]
+    [statement, applied.displayNextDue]
+  );
+
+  const maxCycleOffset = Math.max(1, lastCommitmentCycleIndex(account, expenses));
+  const selectedCutoff = useMemo(
+    () => shiftCutoffDate(statement.lastCutoff, account.cutoffDay, cycleOffset),
+    [statement.lastCutoff, account.cutoffDay, cycleOffset]
+  );
+  const selectedStatement = useMemo(
+    () => (cycleOffset === 0 ? statement : calculateCardBalances(account, expenses, selectedCutoff)),
+    [cycleOffset, statement, account, expenses, selectedCutoff]
+  );
+  const selectedApplied = useMemo(
+    () =>
+      cycleOffset === 0 ? applied : applyPaymentsToStatement(selectedStatement, payments, account.id),
+    [cycleOffset, applied, selectedStatement, payments, account.id]
+  );
+  const cycleWindow = useMemo(
+    () => getStatementWindow(account, selectedCutoff),
+    [account, selectedCutoff]
+  );
+  const expensesById = useMemo(
+    () => Object.fromEntries(expenses.map((expense) => [expense.id, expense])),
+    [expenses]
+  );
+  const cycleItems = useMemo(
+    () =>
+      statementItemsForCutoff(account, expenses, selectedCutoff)
+        .map((item) => ({
+          ...item,
+          allocation:
+            cycleOffset === 0
+              ? selectedApplied.allocations.find((row) => row.key === `${item.id}-${item.label}`) ||
+                selectedApplied.allocationById[item.id]
+              : undefined,
+        }))
+        .filter((item) =>
+          applyStatementFilter(
+            item,
+            expensesById[item.id],
+            filter,
+            item.allocation,
+            cycleOffset === 0 && selectedApplied.settled
+          )
+        ),
+    [account, expenses, selectedCutoff, selectedApplied, expensesById, filter, cycleOffset]
+  );
+  const periodTotal = useMemo(
+    () => cycleItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0),
+    [cycleItems]
   );
 
   const feed = useMemo(
@@ -79,6 +210,36 @@ export default function CardDetailView({
       ),
     [expenses, account.id, month, filter]
   );
+  const processedFeed = useMemo(
+    () =>
+      processMovements(feed, sortBy, groupBy, {
+        getDate: (expense) => expense.purchaseDate,
+        getAmount: (expense) => expense.totalAmount,
+        getCategory: (expense) => expense.category,
+      }),
+    [feed, sortBy, groupBy]
+  );
+  const processedCycle = useMemo(
+    () =>
+      processMovements(cycleItems, sortBy, groupBy, {
+        getDate: (item) => item.purchaseDate,
+        getAmount: (item) => item.amount,
+        getCategory: (item) => expensesById[item.id]?.category || "Otro",
+      }),
+    [cycleItems, sortBy, groupBy, expensesById]
+  );
+  const movementCount = viewMode === "cutoff" ? cycleItems.length : feed.length;
+  const cyclePayments = selectedApplied.cyclePayments || [];
+  const sheetOpen = overlayOpen || filtersOpen || payOpen || Boolean(detailCycle) || timelineOpen;
+
+  useEffect(() => {
+    if (sheetOpen) setDialOpen(false);
+  }, [sheetOpen]);
+
+  useEffect(() => {
+    if (userCycled.current) return;
+    setCycleOffset(preferOpenCycle ? 1 : 0);
+  }, [account.id, preferOpenCycle]);
 
   return (
     <div className="view-slide flex min-h-dvh flex-col bg-slate-950">
@@ -108,31 +269,48 @@ export default function CardDetailView({
       </header>
 
       <div className="mx-auto flex w-full max-w-md flex-1 flex-col px-4 pb-28 pt-5 lg:max-w-3xl">
-        <CreditCardVisual account={displayAccount} selected />
+        <div className="w-full shrink-0">
+          <CreditCardVisual account={displayAccount} selected />
+        </div>
 
         <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
           <MetricCard
-            tone="amber"
+            tone={cycleCleared ? "success" : "amber"}
             label="Pago para no generar intereses"
-            value={formatMXN(statement.currentDue)}
+            value={formatMXN(remainingDue)}
             badge={
-              statement.overdue
-                ? `Venció el ${formatShortDate(statement.paymentDue)}`
-                : `Pagar antes del ${formatShortDate(statement.paymentDue)}`
+              cycleCleared
+                ? "✅ Corte Liquidado"
+                : statement.overdue
+                  ? `Venció el ${formatShortDate(statement.paymentDue)}`
+                  : `Pagar antes del ${formatShortDate(statement.paymentDue)}`
             }
-            hint="Contado + MSI de este corte"
-            overdue={statement.overdue}
+            hint={
+              cycleCleared
+                ? "Cubierto al 100% · Sin pagos pendientes"
+                : `Pendiente: ${formatMXN(remainingDue)} · Abonado: ${formatMXN(applied.paidAmount)}`
+            }
+            overdue={statement.overdue && !cycleCleared}
             onDetail={() => setDetailCycle(currentCycle)}
           />
           <MetricCard
             tone="cyan"
+            featured={cycleCleared}
             label="Acumulado próximo corte"
-            value={formatMXN(statement.nextDue)}
-            badge={`Corte el ${formatShortDate(statement.nextCutoff)}`}
-            hint="Compras nuevas + siguiente MSI"
+            value={formatMXN(applied.displayNextDue)}
+            badge={
+              cycleCleared
+                ? `Siguiente compromiso: ${formatShortDate(statement.nextCutoff)}`
+                : `Corte el ${formatShortDate(statement.nextCutoff)}`
+            }
+            hint={
+              applied.surplus > 0
+                ? `Sobrante aplicado: ${formatMXN(applied.surplus)}`
+                : "Compras nuevas + siguiente MSI"
+            }
             onDetail={() => setDetailCycle(nextCycle)}
           />
-          <MetricCard label="Saldo" value={formatMXN(statement.currentBalance)} hint="Adeudo total calculado" />
+          <MetricCard label="Saldo" value={formatMXN(displayBalance)} hint="Adeudo total tras abonos" />
           <MetricCard
             label="Disponible"
             value={formatMXN(available)}
@@ -142,9 +320,9 @@ export default function CardDetailView({
         </div>
 
         <p className="mt-3 text-[11px] leading-relaxed text-slate-400">
-          Saldo total: {formatMXN(statement.currentBalance)}
+          Saldo total: {formatMXN(displayBalance)}
           {statement.futureMsi > 0 ? ` (incluye ${formatMXN(statement.futureMsi)} en MSI a futuro)` : ""}
-          . Este corte {formatMXN(statement.currentDue)} + próximo {formatMXN(statement.nextDue)}
+          . Este corte {formatMXN(applied.displayCurrentDue)} + próximo {formatMXN(applied.displayNextDue)}
           {statement.futureMsi - statement.nextMsi > 0
             ? ` + MSI posterior ${formatMXN(statement.futureMsi - statement.nextMsi)}`
             : ""}
@@ -164,59 +342,182 @@ export default function CardDetailView({
           </div>
         </div>
 
-        <PaymentTimeline account={account} expenses={expenses} />
+        <PaymentTimeline
+          account={account}
+          expenses={expenses}
+          payments={payments}
+          onBreakdownOpenChange={setTimelineOpen}
+        />
 
-        <div className="mt-8 flex items-center gap-2">
-          <div className="min-w-0 flex-1">
-            <MonthNav value={month} onChange={setMonth} />
-          </div>
-          <button
-            type="button"
-            onClick={() => setFiltersOpen(true)}
-            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/60 text-slate-200"
-            aria-label="Filtros"
-          >
-            <SlidersHorizontal className="h-4 w-4" />
-          </button>
+        <div className="mt-8 flex rounded-2xl border border-slate-800 bg-slate-900/60 p-1">
+          {[
+            { id: "movements", label: "Movimientos", count: movementCount },
+            { id: "payments", label: "Historial de Abonos", count: cyclePayments.length },
+          ].map((tab) => {
+            const active = historyTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setHistoryTab(tab.id)}
+                className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl px-2 py-2.5 text-xs font-semibold transition duration-200 ${
+                  active ? "bg-white text-slate-950 shadow-sm" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <span className="truncate">{tab.label}</span>
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                    active ? "bg-slate-900/10 text-slate-800" : "bg-slate-800 text-slate-300"
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
+        <div className="mt-3 flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            {viewMode === "cutoff" ? (
+              <MonthNav
+                label={formatDateRange(cycleWindow.start, cycleWindow.end)}
+                onPrev={() => {
+                  userCycled.current = true;
+                  setCycleOffset((value) => Math.max(-18, value - 1));
+                }}
+                onNext={() => {
+                  userCycled.current = true;
+                  setCycleOffset((value) => Math.min(maxCycleOffset, value + 1));
+                }}
+                prevAria="Ciclo anterior"
+                nextAria="Ciclo siguiente"
+              />
+            ) : (
+              <MonthNav value={month} onChange={setMonth} />
+            )}
+          </div>
+          {historyTab === "movements" ? (
+            <button
+              type="button"
+              onClick={() => setFiltersOpen(true)}
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/60 text-slate-200"
+              aria-label="Filtros"
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+            </button>
+          ) : null}
+        </div>
+        {viewMode === "cutoff" ? (
+          <p className="mt-2 px-1 text-[11px] text-slate-500">
+            Ciclo {formatMonthLabel(selectedApplied.cycleMonth)} · corte {formatShortDate(selectedStatement.lastCutoff)}
+            {cycleOffset === 0
+              ? " · coincide con el pago para no generar intereses"
+              : cycleOffset === 1
+                ? " · ciclo en curso (acumulado del próximo corte)"
+                : ""}
+          </p>
+        ) : null}
+
         <div className="mt-5">
-          <h2 className="mb-3 text-base font-semibold text-white">Movimientos</h2>
-          <ExpenseList
-            expenses={feed}
-            accounts={accounts}
-            categories={categories}
-            loading={loading}
-            emptyText="No hay gastos de esta tarjeta en el mes seleccionado."
-            onEdit={onEditExpense}
-            onAdvance={onAdvance}
-            onToggleStatus={onToggleStatus}
-            onDelete={onDelete}
-          />
+          {historyTab === "payments" ? (
+            <>
+              <div className="mb-3 flex items-end justify-between gap-3">
+                <h2 className="text-base font-semibold text-white">Abonos del periodo</h2>
+                <p className="text-sm font-semibold text-emerald-300">{formatMXN(selectedApplied.paidAmount)}</p>
+              </div>
+              <PaymentHistoryList payments={cyclePayments} onDelete={onDeletePayment} />
+            </>
+          ) : (
+            <>
+              <div className="mb-3 flex items-end justify-between gap-3">
+                <h2 className="text-base font-semibold text-white">Movimientos</h2>
+                {viewMode === "cutoff" ? (
+                  <p className="text-sm font-semibold text-white">{formatMXN(periodTotal)}</p>
+                ) : null}
+              </div>
+              {viewMode === "cutoff" ? (
+                <StatementItemList
+                  items={processedCycle.items}
+                  groups={processedCycle.groups}
+                  groupMode={groupBy === "category" ? "category" : "none"}
+                  categories={categories}
+                  expensesById={expensesById}
+                  allocationById={selectedApplied.allocationById}
+                  settled={selectedApplied.settled}
+                  loading={loading}
+                  emptyText="No hay cargos de este ciclo de corte."
+                  onAdvance={onAdvance}
+                  onOpenActions={onOpenActions}
+                />
+              ) : (
+                <ExpenseList
+                  expenses={processedFeed.items}
+                  groups={processedFeed.groups}
+                  groupMode={groupBy === "category" ? "category" : "none"}
+                  accounts={accounts}
+                  categories={categories}
+                  loading={loading}
+                  emptyText="No hay gastos de esta tarjeta en el mes seleccionado."
+                  allocationById={applied.allocationById}
+                  settled={applied.settled}
+                  onOpenActions={onOpenActions}
+                  onAdvance={onAdvance}
+                  onToggleStatus={onToggleStatus}
+                />
+              )}
+            </>
+          )}
         </div>
       </div>
 
-      <button
-        type="button"
-        onClick={onAddExpense}
-        className="fab fixed bottom-6 right-5 z-20 flex h-14 w-14 items-center justify-center rounded-full bg-emerald-400 text-slate-950 shadow-lg shadow-emerald-400/30 lg:right-[calc((100vw-48rem)/2+1.25rem)]"
-        aria-label="Nuevo gasto"
-      >
-        <Plus className="h-7 w-7" />
-      </button>
+      {!sheetOpen ? (
+        <CardSpeedDial
+          open={dialOpen}
+          onToggle={() => setDialOpen((open) => !open)}
+          onExpense={() => {
+            setDialOpen(false);
+            onAddExpense();
+          }}
+          onPay={() => {
+            setDialOpen(false);
+            setPayOpen(true);
+          }}
+        />
+      ) : null}
 
       <MonthBreakdownModal open={Boolean(detailCycle)} cycle={detailCycle} onClose={() => setDetailCycle(null)} />
-      <FilterSheet
+      <AddPaymentModal
+        open={payOpen}
+        account={account}
+        cycleMonth={applied.cycleMonth}
+        currentDue={statement.currentDue}
+        remainingCurrent={applied.remainingCurrent}
+        paidAmount={applied.paidAmount}
+        payments={applied.cyclePayments}
+        saving={savingPayment}
+        onClose={() => setPayOpen(false)}
+        onSubmit={onAddPayment}
+        onDelete={onDeletePayment}
+      />
+      <FilterBottomSheet
         open={filtersOpen}
-        value={filter}
-        onChange={setFilter}
+        variant="card"
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        cardFilter={filter}
+        onCardFilterChange={setFilter}
+        sortBy={sortBy}
+        groupBy={groupBy}
+        onSortChange={(next) => setSortPref((current) => ({ ...current, sortBy: next }))}
+        onGroupChange={(next) => setSortPref((current) => ({ ...current, groupBy: next }))}
         onClose={() => setFiltersOpen(false)}
       />
     </div>
   );
 }
 
-function MetricCard({ tone, label, value, badge, hint, overdue, accent, onDetail }) {
+function MetricCard({ tone, label, value, badge, hint, overdue, accent, featured, onDetail }) {
   const tones = {
     amber: {
       card: "border-amber-400/25 from-amber-400/15",
@@ -228,6 +529,11 @@ function MetricCard({ tone, label, value, badge, hint, overdue, accent, onDetail
       label: "text-cyan-200/90",
       badge: "bg-cyan-400/15 text-cyan-100",
     },
+    success: {
+      card: "border-emerald-400/35 from-emerald-400/15",
+      label: "text-emerald-200/90",
+      badge: "bg-emerald-400/15 text-emerald-100",
+    },
   };
   const skin = tones[tone] ?? {
     card: "border-slate-800 from-slate-900/40",
@@ -236,11 +542,17 @@ function MetricCard({ tone, label, value, badge, hint, overdue, accent, onDetail
   };
 
   return (
-    <article className={`flex h-[8.75rem] flex-col rounded-2xl border bg-gradient-to-br to-slate-900 p-3 ${skin.card}`}>
+    <article
+      className={`flex h-auto min-h-0 flex-col rounded-2xl border bg-gradient-to-br to-slate-900 p-3 transition-all duration-500 ${skin.card} ${
+        featured ? "ring-1 ring-emerald-500/40 ring-offset-0" : ""
+      }`}
+    >
       <p className={`line-clamp-2 text-[10px] font-semibold uppercase leading-tight tracking-wide ${skin.label}`}>
         {label}
       </p>
-      <p className={`mt-1.5 text-base font-semibold ${accent ? "text-emerald-300" : "text-white"}`}>{value}</p>
+      <p className={`mt-1.5 text-base font-semibold ${accent || tone === "success" ? "text-emerald-300" : "text-white"}`}>
+        {value}
+      </p>
       {badge ? (
         <span className={`mt-1.5 inline-flex w-fit max-w-full truncate rounded-full px-2 py-0.5 text-[10px] font-semibold ${skin.badge}`}>
           {badge}
@@ -248,7 +560,7 @@ function MetricCard({ tone, label, value, badge, hint, overdue, accent, onDetail
       ) : (
         <span className="mt-1.5 h-[1.125rem]" />
       )}
-      <p className="mt-auto truncate text-[10px] text-slate-400">{hint}</p>
+      <p className="mt-auto line-clamp-2 text-[10px] text-slate-400">{hint}</p>
       {onDetail ? (
         <button
           type="button"

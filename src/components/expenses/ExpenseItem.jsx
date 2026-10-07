@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Check, FastForward, MoreHorizontal, Pencil, Sparkles, Trash2 } from "lucide-react";
+import { Check, FastForward, Lock, MoreVertical, Sparkles } from "lucide-react";
 import { getCategoryColor, getCategoryIcon, resolveCategory } from "../../constants/categories";
 import { formatExpenseDate, paidInstallments } from "../../utils/expenses";
 import { formatMXN } from "../../utils/money";
@@ -8,12 +7,12 @@ export default function ExpenseItem({
   expense,
   account,
   categories,
-  onEdit,
+  allocation,
+  locked = false,
+  onOpenActions,
   onAdvance,
   onToggleStatus,
-  onDelete,
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
   const category = resolveCategory(expense.category, categories);
   const Icon = getCategoryIcon(category.icon);
   const tone = getCategoryColor(category.color);
@@ -21,9 +20,27 @@ export default function ExpenseItem({
   const total = Math.max(1, Number(expense.totalInstallments) || 1);
   const progress = Math.min(100, (paid / total) * 100);
   const isPaid = expense.status === "paid" || expense.remainingInstallments <= 0;
+  const cyclePaid = locked || (!expense.isMsi && allocation?.fullyPaid);
+  const partial = Boolean(allocation?.partial) && !cyclePaid;
+
+  function openActions(event) {
+    event?.stopPropagation?.();
+    onOpenActions?.(expense);
+  }
 
   return (
-    <article className="relative rounded-2xl border border-slate-800 bg-slate-900/60 p-3.5 backdrop-blur">
+    <article
+      role="button"
+      tabIndex={0}
+      onClick={openActions}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openActions(event);
+        }
+      }}
+      className="cursor-pointer rounded-2xl border border-slate-800 bg-slate-900/60 p-3.5 backdrop-blur transition-colors hover:bg-slate-800/60"
+    >
       <div className="flex items-start gap-3">
         <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl ${tone.icon}`}>
           <Icon className="h-4 w-4" />
@@ -38,14 +55,24 @@ export default function ExpenseItem({
                 {account ? ` · ${account.name}` : ""}
               </p>
             </div>
-            <div className="text-right">
-              <p className="text-sm font-semibold text-white">{formatMXN(expense.totalAmount)}</p>
-              {expense.cashbackEarned > 0 ? (
-                <p className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-emerald-400">
-                  <Sparkles className="h-3 w-3" />
-                  + {formatMXN(expense.cashbackEarned)}
-                </p>
-              ) : null}
+            <div className="flex items-start gap-1">
+              <div className="text-right">
+                <p className="text-sm font-semibold text-white">{formatMXN(expense.totalAmount)}</p>
+                {expense.cashbackEarned > 0 ? (
+                  <p className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-emerald-400">
+                    <Sparkles className="h-3 w-3" />
+                    + {formatMXN(expense.cashbackEarned)}
+                  </p>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={openActions}
+                className="rounded-xl p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                aria-label="Más acciones"
+              >
+                <MoreVertical className="h-4 w-4" />
+              </button>
             </div>
           </div>
 
@@ -68,74 +95,58 @@ export default function ExpenseItem({
             <p className="mt-2 text-[11px] text-slate-500">Pago de contado</p>
           )}
 
+          {partial ? (
+            <div className="mt-3">
+              <p className="mb-1 text-[11px] font-semibold text-amber-200">
+                Parcial: {formatMXN(allocation.applied)} / {formatMXN(allocation.charge)}
+              </p>
+              <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className="h-full rounded-full bg-amber-400 transition-all duration-500"
+                  style={{ width: `${Math.min(100, (allocation.applied / Math.max(allocation.charge, 0.01)) * 100)}%` }}
+                />
+              </div>
+            </div>
+          ) : null}
+
           <div className="mt-3 flex flex-wrap gap-2">
             <span
-              className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
-                isPaid ? "bg-emerald-400/15 text-emerald-300" : "bg-amber-400/15 text-amber-200"
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                cyclePaid || isPaid ? "bg-emerald-400/15 text-emerald-300" : "bg-amber-400/15 text-amber-200"
               }`}
             >
-              {isPaid ? "Pagada" : "Pendiente"}
+              {cyclePaid ? <Lock className="h-3 w-3" /> : null}
+              {cyclePaid ? "Pagado" : isPaid ? "Pagada" : "Pendiente"}
             </span>
-            {expense.isMsi && !isPaid ? (
+            {expense.isMsi && !isPaid && !locked ? (
               <button
                 type="button"
-                onClick={() => onAdvance(expense)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onAdvance(expense);
+                }}
                 className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-200"
               >
                 <FastForward className="h-3 w-3" />
                 Adelantar
               </button>
             ) : null}
-            <button
-              type="button"
-              onClick={() => onToggleStatus(expense)}
-              className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-200"
-            >
-              <Check className="h-3 w-3" />
-              {isPaid ? "Pendiente" : "Pagada"}
-            </button>
+            {locked ? null : (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleStatus(expense);
+                }}
+                className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-200"
+              >
+                <Check className="h-3 w-3" />
+                {isPaid ? "Pendiente" : "Pagada"}
+              </button>
+            )}
           </div>
         </div>
-
-        <button
-          type="button"
-          onClick={() => setMenuOpen((open) => !open)}
-          className="rounded-xl p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
-          aria-label="Acciones"
-        >
-          <MoreHorizontal className="h-4 w-4" />
-        </button>
       </div>
-
-      {menuOpen ? (
-        <div className="absolute right-3 top-12 z-10 w-40 overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-xl">
-          <MenuButton icon={Pencil} label="Editar" onClick={() => { setMenuOpen(false); onEdit(expense); }} />
-          {expense.isMsi && !isPaid ? (
-            <MenuButton icon={FastForward} label="Adelantar" onClick={() => { setMenuOpen(false); onAdvance(expense); }} />
-          ) : null}
-          <MenuButton
-            icon={Trash2}
-            label="Eliminar"
-            danger
-            onClick={() => { setMenuOpen(false); onDelete(expense); }}
-          />
-        </div>
-      ) : null}
     </article>
-  );
-}
-
-function MenuButton({ icon: Icon, label, onClick, danger = false }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm ${
-        danger ? "text-rose-400" : "text-slate-200"
-      }`}
-    >
-      <Icon className="h-3.5 w-3.5" />
-      {label}
-    </button>
   );
 }

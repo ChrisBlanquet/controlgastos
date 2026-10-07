@@ -41,6 +41,15 @@ input[type="number"] {
   border-color: rgb(52 211 153 / 0.5);
 }
 
+/* ID-1 (85.60 × 53.98 mm). Height comes only from aspect-ratio — never a fixed rem. */
+.credit-card-plastic {
+  width: 100%;
+  max-width: 24rem;
+  height: auto;
+  margin-inline: auto;
+  aspect-ratio: 1.586 / 1;
+}
+
 .card-shine {
   background: linear-gradient(
     115deg,
