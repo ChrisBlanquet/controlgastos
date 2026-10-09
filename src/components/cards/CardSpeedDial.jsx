@@ -1,5 +1,6 @@
 import { createPortal } from "react-dom";
 import { ArrowDownCircle, Plus, ShoppingBag } from "lucide-react";
+import { haptic } from "../../utils/haptic";
 
 export default function CardSpeedDial({ open, onToggle, onExpense, onPay }) {
   return createPortal(
@@ -35,7 +36,10 @@ export default function CardSpeedDial({ open, onToggle, onExpense, onPay }) {
 
         <button
           type="button"
-          onClick={onToggle}
+          onClick={() => {
+            haptic(15);
+            onToggle();
+          }}
           className="pointer-events-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-400 text-slate-950 shadow-lg shadow-emerald-400/30"
           aria-label={open ? "Cerrar menú" : "Agregar movimiento"}
           aria-expanded={open}

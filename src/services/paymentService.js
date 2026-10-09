@@ -11,12 +11,15 @@ function mapPayments(snapshot) {
 }
 
 export function normalizePaymentPayload(payload) {
+  const cycleKeyRaw = String(payload.cycleKey || payload.cycleMonth || "auto").trim();
+  const cycleKey = cycleKeyRaw === "auto" || !cycleKeyRaw ? "auto" : cycleKeyRaw.slice(0, 7);
   return {
     accountId: String(payload.accountId || ""),
     amount: roundMoney(toSafeNumber(payload.amount, 0)),
     date: payload.date || todayISO(),
     notes: String(payload.notes || "").trim(),
-    cycleMonth: String(payload.cycleMonth || "").slice(0, 7),
+    cycleKey,
+    cycleMonth: cycleKey,
   };
 }
 
@@ -34,8 +37,11 @@ export function subscribePayments(onData, onError) {
 export async function createPayment(payload, ownerUid) {
   try {
     const data = normalizePaymentPayload(payload);
-    if (!(data.amount > 0) || !data.accountId || !data.cycleMonth) {
-      throw new Error("El abono necesita tarjeta, monto y ciclo.");
+    if (!(data.amount > 0) || !data.accountId) {
+      throw new Error("El abono necesita tarjeta y monto.");
+    }
+    if (data.cycleKey !== "auto" && !/^\d{4}-\d{2}$/.test(data.cycleKey)) {
+      throw new Error("Elige el corte al que corresponde este pago.");
     }
     const reference = await addDoc(collection(db, PAYMENTS), {
       ...data,

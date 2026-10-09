@@ -1,5 +1,7 @@
-import { CreditCard, LogOut, Plus } from "lucide-react";
+import { CreditCard, Eye, EyeOff, LogOut, Plus } from "lucide-react";
 import { NAV_ITEMS } from "../../constants/nav";
+import { usePrivacy } from "../../context/PrivacyContext";
+import { haptic } from "../../utils/haptic";
 
 export default function AppLayout({
   activeTab,
@@ -12,6 +14,7 @@ export default function AppLayout({
 }) {
   const displayName = user?.displayName || "Usuario";
   const photoURL = user?.photoURL;
+  const { hidden, toggle } = usePrivacy();
 
   return (
     <div className="min-h-dvh overflow-x-hidden bg-slate-950 text-slate-100">
@@ -20,10 +23,11 @@ export default function AppLayout({
           <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-400/15 ring-1 ring-emerald-400/30">
             <CreditCard className="h-5 w-5 text-emerald-300" />
           </div>
-          <div>
+          <div className="min-w-0 flex-1">
             <p className="text-sm font-semibold text-white">Control de Pagos</p>
             <p className="text-[11px] text-slate-500">Finanzas personales</p>
           </div>
+          <PrivacyToggle hidden={hidden} onToggle={toggle} />
         </div>
 
         <nav className="flex-1 space-y-1">
@@ -88,6 +92,7 @@ export default function AppLayout({
               <p className="text-sm font-semibold text-white">Control de Pagos</p>
               <p className="truncate text-xs text-slate-400">{displayName}</p>
             </div>
+            <PrivacyToggle hidden={hidden} onToggle={toggle} />
           </div>
         </header>
 
@@ -99,7 +104,10 @@ export default function AppLayout({
       {showFab ? (
         <button
           type="button"
-          onClick={onAddExpense}
+          onClick={() => {
+            haptic(15);
+            onAddExpense();
+          }}
           className="fab fixed right-4 bottom-20 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-emerald-400 text-slate-950 shadow-lg shadow-emerald-500/20 md:bottom-8"
           aria-label="Agregar gasto"
         >
@@ -129,5 +137,19 @@ export default function AppLayout({
         </div>
       </nav>
     </div>
+  );
+}
+
+function PrivacyToggle({ hidden, onToggle }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-800 hover:text-white"
+      aria-label={hidden ? "Mostrar cifras" : "Ocultar cifras"}
+      aria-pressed={hidden}
+    >
+      {hidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+    </button>
   );
 }

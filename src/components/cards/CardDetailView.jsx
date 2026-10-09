@@ -3,12 +3,15 @@ import { ArrowLeft, Pencil, SlidersHorizontal } from "lucide-react";
 import { formatDateRange, formatShortDate, shiftCutoffDate, startOfDay } from "../../utils/cardDates";
 import { currentMonthValue, formatMonthLabel, matchesMonth } from "../../utils/expenses";
 import {
+  buildAccountPaymentLedger,
   calculateCardBalances,
   getStatementWindow,
   lastCommitmentCycleIndex,
   statementItemsForCutoff,
 } from "../../utils/cardStatement";
-import { applyPaymentsToStatement } from "../../utils/payments";
+import { cycleMonthFromDate, paymentsForAccount } from "../../utils/payments";
+import { roundMoney, toSafeNumber } from "../../utils/numbers";
+import { haptic } from "../../utils/haptic";
 import { persistSortPref, processMovements, readSortPref } from "../../utils/movementSort";
 import AddPaymentModal from "./AddPaymentModal";
 import CardSpeedDial from "./CardSpeedDial";
@@ -90,6 +93,7 @@ export default function CardDetailView({
   const sortBy = sortPref.sortBy;
   const groupBy = sortPref.groupBy;
   const userCycled = useRef(false);
+  const settledPulse = useRef(null);
 
   useEffect(() => {
     persistViewMode(viewMode);
@@ -101,16 +105,37 @@ export default function CardDetailView({
 
   useEffect(() => {
     userCycled.current = false;
+    settledPulse.current = null;
   }, [account.id]);
 
   const statement = useMemo(
     () => calculateCardBalances(account, expenses),
     [account, expenses]
   );
-  const applied = useMemo(
-    () => applyPaymentsToStatement(statement, payments, account.id),
-    [statement, payments, account.id]
+  const ledger = useMemo(
+    () => buildAccountPaymentLedger(account, expenses, payments),
+    [account, expenses, payments]
   );
+  const currentKey = statement.cycleMonth;
+  const nextKey = cycleMonthFromDate(statement.nextCutoff);
+  const currentEntry = ledger.byKey[currentKey];
+  const nextEntry = ledger.byKey[nextKey];
+  const applied = useMemo(() => {
+    const remainingCurrent = currentEntry?.remaining ?? 0;
+    return {
+      cycleMonth: currentKey,
+      cyclePayments: currentEntry?.cyclePayments || [],
+      paidAmount: currentEntry?.paidAmount || 0,
+      remainingCurrent,
+      surplus: currentEntry?.surplus || 0,
+      settled: Boolean(currentEntry?.settled),
+      allocations: currentEntry?.allocations || [],
+      allocationById: currentEntry?.allocationById || {},
+      displayBalance: roundMoney(Math.max(0, toSafeNumber(statement.currentBalance, 0) - ledger.allPaid)),
+      displayCurrentDue: remainingCurrent,
+      displayNextDue: nextEntry?.remaining ?? 0,
+    };
+  }, [currentEntry, nextEntry, currentKey, statement.currentBalance, ledger.allPaid]);
   const displayBalance = applied.displayBalance;
   const displayAccount = useMemo(
     () => ({ ...account, currentBalance: displayBalance }),
@@ -123,14 +148,7 @@ export default function CardDetailView({
   const cycleCleared = remainingDue <= 0.01;
   const pastPaymentDue = startOfDay(new Date()) >= startOfDay(statement.paymentDue);
   const preferOpenCycle = cycleCleared || pastPaymentDue;
-  const currentItems = useMemo(
-    () =>
-      statement.currentItems.map((item) => ({
-        ...item,
-        allocation: applied.allocations.find((row) => row.key === `${item.id}-${item.label}`) || applied.allocationById[item.id],
-      })),
-    [statement.currentItems, applied]
-  );
+  const currentItems = currentEntry?.items || statement.currentItems;
   const currentCycle = useMemo(
     () => ({
       label: formatMonthLabel(applied.cycleMonth),
@@ -142,13 +160,11 @@ export default function CardDetailView({
   );
   const nextCycle = useMemo(
     () => ({
-      label: formatMonthLabel(
-        `${statement.nextCutoff.getFullYear()}-${String(statement.nextCutoff.getMonth() + 1).padStart(2, "0")}`
-      ),
+      label: formatMonthLabel(nextKey),
       total: applied.displayNextDue,
-      items: statement.nextItems,
+      items: nextEntry?.items || statement.nextItems,
     }),
-    [statement, applied.displayNextDue]
+    [statement, applied.displayNextDue, nextKey, nextEntry]
   );
 
   const maxCycleOffset = Math.max(1, lastCommitmentCycleIndex(account, expenses));
@@ -160,11 +176,18 @@ export default function CardDetailView({
     () => (cycleOffset === 0 ? statement : calculateCardBalances(account, expenses, selectedCutoff)),
     [cycleOffset, statement, account, expenses, selectedCutoff]
   );
-  const selectedApplied = useMemo(
-    () =>
-      cycleOffset === 0 ? applied : applyPaymentsToStatement(selectedStatement, payments, account.id),
-    [cycleOffset, applied, selectedStatement, payments, account.id]
-  );
+  const viewedKey = cycleMonthFromDate(selectedCutoff);
+  const selectedApplied = ledger.byKey[viewedKey] || {
+    monthKey: viewedKey,
+    cycleMonth: viewedKey,
+    cyclePayments: [],
+    paidAmount: 0,
+    remaining: 0,
+    settled: false,
+    allocations: [],
+    allocationById: {},
+    items: [],
+  };
   const cycleWindow = useMemo(
     () => getStatementWindow(account, selectedCutoff),
     [account, selectedCutoff]
@@ -175,14 +198,16 @@ export default function CardDetailView({
   );
   const cycleItems = useMemo(
     () =>
-      statementItemsForCutoff(account, expenses, selectedCutoff)
+      (selectedApplied.items?.length
+        ? selectedApplied.items
+        : statementItemsForCutoff(account, expenses, selectedCutoff)
+      )
         .map((item) => ({
           ...item,
           allocation:
-            cycleOffset === 0
-              ? selectedApplied.allocations.find((row) => row.key === `${item.id}-${item.label}`) ||
-                selectedApplied.allocationById[item.id]
-              : undefined,
+            item.allocation ||
+            selectedApplied.allocations?.find((row) => row.key === `${item.id}-${item.label}`) ||
+            selectedApplied.allocationById?.[item.id],
         }))
         .filter((item) =>
           applyStatementFilter(
@@ -190,10 +215,10 @@ export default function CardDetailView({
             expensesById[item.id],
             filter,
             item.allocation,
-            cycleOffset === 0 && selectedApplied.settled
+            selectedApplied.settled
           )
         ),
-    [account, expenses, selectedCutoff, selectedApplied, expensesById, filter, cycleOffset]
+    [account, expenses, selectedCutoff, selectedApplied, expensesById, filter]
   );
   const periodTotal = useMemo(
     () => cycleItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0),
@@ -240,6 +265,15 @@ export default function CardDetailView({
     if (userCycled.current) return;
     setCycleOffset(preferOpenCycle ? 1 : 0);
   }, [account.id, preferOpenCycle]);
+
+  useEffect(() => {
+    if (settledPulse.current === null) {
+      settledPulse.current = cycleCleared;
+      return;
+    }
+    if (!settledPulse.current && cycleCleared) haptic(20);
+    settledPulse.current = cycleCleared;
+  }, [cycleCleared]);
 
   return (
     <div className="view-slide flex min-h-dvh flex-col bg-slate-950">
@@ -291,6 +325,7 @@ export default function CardDetailView({
                 : `Pendiente: ${formatMXN(remainingDue)} · Abonado: ${formatMXN(applied.paidAmount)}`
             }
             overdue={statement.overdue && !cycleCleared}
+            celebrate={cycleCleared}
             onDetail={() => setDetailCycle(currentCycle)}
           />
           <MetricCard
@@ -490,11 +525,29 @@ export default function CardDetailView({
       <AddPaymentModal
         open={payOpen}
         account={account}
-        cycleMonth={applied.cycleMonth}
-        currentDue={statement.currentDue}
-        remainingCurrent={applied.remainingCurrent}
-        paidAmount={applied.paidAmount}
-        payments={applied.cyclePayments}
+        viewedCycle={{
+          key: viewedKey,
+          rangeLabel: formatDateRange(cycleWindow.start, cycleWindow.end),
+          monthLabel: formatMonthLabel(viewedKey),
+          remaining: selectedApplied.remaining ?? 0,
+          paidAmount: selectedApplied.paidAmount || 0,
+        }}
+        currentCycle={{
+          key: currentKey,
+          monthLabel: formatMonthLabel(currentKey),
+          remaining: applied.remainingCurrent,
+          paidAmount: applied.paidAmount,
+        }}
+        oldestUnpaid={
+          ledger.oldestUnpaid
+            ? {
+                key: ledger.oldestUnpaid.monthKey,
+                monthLabel: ledger.oldestUnpaid.label,
+                remaining: ledger.oldestUnpaid.remaining,
+              }
+            : null
+        }
+        payments={paymentsForAccount(payments, account.id)}
         saving={savingPayment}
         onClose={() => setPayOpen(false)}
         onSubmit={onAddPayment}
@@ -517,7 +570,7 @@ export default function CardDetailView({
   );
 }
 
-function MetricCard({ tone, label, value, badge, hint, overdue, accent, featured, onDetail }) {
+function MetricCard({ tone, label, value, badge, hint, overdue, accent, featured, celebrate, onDetail }) {
   const tones = {
     amber: {
       card: "border-amber-400/25 from-amber-400/15",
@@ -545,7 +598,7 @@ function MetricCard({ tone, label, value, badge, hint, overdue, accent, featured
     <article
       className={`flex h-auto min-h-0 flex-col rounded-2xl border bg-gradient-to-br to-slate-900 p-3 transition-all duration-500 ${skin.card} ${
         featured ? "ring-1 ring-emerald-500/40 ring-offset-0" : ""
-      }`}
+      } ${celebrate ? "settle-flash" : ""}`}
     >
       <p className={`line-clamp-2 text-[10px] font-semibold uppercase leading-tight tracking-wide ${skin.label}`}>
         {label}

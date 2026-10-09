@@ -4,7 +4,20 @@ const mxn = new Intl.NumberFormat("es-MX", {
   maximumFractionDigits: 2,
 });
 
+const MASK = "$ •••••";
+let hideSensitiveBalances = false;
+try {
+  hideSensitiveBalances = localStorage.getItem("hideSensitiveBalances") === "true";
+} catch {
+  hideSensitiveBalances = false;
+}
+
+export function setHideSensitiveBalances(hidden) {
+  hideSensitiveBalances = Boolean(hidden);
+}
+
 export function formatMXN(value) {
+  if (hideSensitiveBalances) return MASK;
   return mxn.format(Number(value) || 0);
 }
 

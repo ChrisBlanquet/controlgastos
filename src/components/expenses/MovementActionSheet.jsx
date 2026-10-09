@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pencil, Trash2, X } from "lucide-react";
 import { formatExpenseDate } from "../../utils/expenses";
+import { haptic } from "../../utils/haptic";
 import { formatMXN } from "../../utils/money";
 
 export default function MovementActionSheet({ open, expense, amount, saving, onClose, onEdit, onDelete }) {
@@ -17,6 +18,7 @@ export default function MovementActionSheet({ open, expense, amount, saving, onC
 
   async function handleDelete() {
     try {
+      haptic(15);
       await onDelete(expense);
       setConfirming(false);
       onClose();

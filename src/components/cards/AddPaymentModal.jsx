@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { Banknote, Trash2, X } from "lucide-react";
-import { NUMBER_INPUT } from "../../constants/ui";
+import { INPUT_BASE, NUMBER_INPUT } from "../../constants/ui";
 import { todayISO } from "../../utils/expenses";
 import { formatMXN } from "../../utils/money";
 import { roundMoney, toSafeNumber } from "../../utils/numbers";
+import { AUTO_CYCLE_KEY, resolvePaymentCycleKey } from "../../utils/payments";
 
 const SHORTCUTS = [500, 1000];
 
 export default function AddPaymentModal({
   open,
   account,
-  cycleMonth,
-  currentDue,
-  remainingCurrent,
-  paidAmount,
-  payments,
+  viewedCycle,
+  currentCycle,
+  oldestUnpaid,
+  payments = [],
   saving,
   onClose,
   onSubmit,
@@ -23,24 +23,45 @@ export default function AddPaymentModal({
   const [amount, setAmount] = useState("");
   const [notes, setNotes] = useState("");
   const [custom, setCustom] = useState(false);
+  const [paymentDate, setPaymentDate] = useState(todayISO());
+  const [cycleKey, setCycleKey] = useState(AUTO_CYCLE_KEY);
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
 
-  const due = roundMoney(toSafeNumber(currentDue, 0));
-  const remaining = roundMoney(toSafeNumber(remainingCurrent, 0));
+  const viewedKey = viewedCycle?.key || "";
+  const currentKey = currentCycle?.key || "";
 
   useEffect(() => {
     if (!open) return;
-    setAmount(remaining > 0 ? String(remaining) : "");
+    const preset = viewedKey || currentKey || AUTO_CYCLE_KEY;
+    setCycleKey(preset);
+    setPaymentDate(todayISO());
     setNotes("");
     setCustom(false);
     setError(null);
-  }, [open, remaining]);
+  }, [open, viewedKey, currentKey]);
 
-  const history = useMemo(
-    () => [...(payments || [])].sort((a, b) => String(b.date).localeCompare(String(a.date))),
-    [payments]
-  );
+  const targetRemaining = useMemo(() => {
+    if (cycleKey === AUTO_CYCLE_KEY) return roundMoney(toSafeNumber(oldestUnpaid?.remaining ?? viewedCycle?.remaining, 0));
+    if (cycleKey === viewedKey) return roundMoney(toSafeNumber(viewedCycle?.remaining, 0));
+    if (cycleKey === currentKey) return roundMoney(toSafeNumber(currentCycle?.remaining, 0));
+    return 0;
+  }, [cycleKey, viewedKey, currentKey, viewedCycle, currentCycle, oldestUnpaid]);
+
+  useEffect(() => {
+    if (!open) return;
+    setAmount(targetRemaining > 0 ? String(targetRemaining) : "");
+    setCustom(false);
+  }, [open, targetRemaining, cycleKey]);
+
+  const history = useMemo(() => {
+    const rows = (payments || []).filter((payment) => {
+      const key = resolvePaymentCycleKey(payment);
+      if (cycleKey === AUTO_CYCLE_KEY) return key === AUTO_CYCLE_KEY;
+      return key === cycleKey;
+    });
+    return rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  }, [payments, cycleKey]);
 
   if (!open || !account) return null;
 
@@ -56,9 +77,10 @@ export default function AddPaymentModal({
       await onSubmit({
         accountId: account.id,
         amount: value,
-        date: todayISO(),
+        date: paymentDate || todayISO(),
         notes,
-        cycleMonth,
+        cycleKey,
+        cycleMonth: cycleKey,
       });
       setNotes("");
     } catch (err) {
@@ -77,6 +99,15 @@ export default function AddPaymentModal({
     }
   }
 
+  const cycleLabel =
+    cycleKey === AUTO_CYCLE_KEY
+      ? oldestUnpaid
+        ? `Automático · ${oldestUnpaid.monthLabel}`
+        : "Automático"
+      : cycleKey === viewedKey
+        ? viewedCycle?.monthLabel
+        : currentCycle?.monthLabel;
+
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center lg:items-center">
       <button type="button" className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} aria-label="Cerrar" />
@@ -86,7 +117,7 @@ export default function AddPaymentModal({
             <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-300/80">Abono a tarjeta</p>
             <h2 className="text-lg font-semibold text-white">Registrar abono / pagar</h2>
             <p className="mt-1 text-xs text-slate-400">
-              {account.name} · ciclo {cycleMonth}
+              {account.name} · {cycleLabel}
             </p>
           </div>
           <button type="button" onClick={onClose} className="rounded-full bg-slate-800 p-2 text-slate-300" aria-label="Cerrar">
@@ -97,23 +128,27 @@ export default function AddPaymentModal({
         <div className="mb-4 grid grid-cols-2 gap-2">
           <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-3 py-2.5">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-200/80">Pendiente</p>
-            <p className="mt-1 text-sm font-semibold text-white">{formatMXN(remaining)}</p>
+            <p className="mt-1 text-sm font-semibold text-white">{formatMXN(targetRemaining)}</p>
           </div>
           <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-3 py-2.5">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-200/80">Abonado</p>
-            <p className="mt-1 text-sm font-semibold text-white">{formatMXN(paidAmount)}</p>
+            <p className="mt-1 text-sm font-semibold text-white">
+              {formatMXN(
+                cycleKey === currentKey && cycleKey !== viewedKey ? currentCycle?.paidAmount : viewedCycle?.paidAmount
+              )}
+            </p>
           </div>
         </div>
 
         <form onSubmit={handleSubmit} className="min-h-0 flex-1 space-y-4 overflow-y-auto">
           <div className="flex flex-wrap gap-2">
             <Shortcut
-              active={!custom && roundMoney(toSafeNumber(amount, 0)) === due && due > 0}
+              active={!custom && roundMoney(toSafeNumber(amount, 0)) === targetRemaining && targetRemaining > 0}
               onClick={() => {
                 setCustom(false);
-                setAmount(String(due));
+                setAmount(String(targetRemaining));
               }}
-              disabled={!(due > 0)}
+              disabled={!(targetRemaining > 0)}
             >
               Pagar total del corte
             </Shortcut>
@@ -158,12 +193,46 @@ export default function AddPaymentModal({
           </label>
 
           <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-slate-400">Fecha del pago</span>
+            <input
+              type="date"
+              value={paymentDate}
+              onChange={(event) => setPaymentDate(event.target.value)}
+              className={`${INPUT_BASE} [color-scheme:dark]`}
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-slate-400">¿A qué corte/ciclo corresponde este pago?</span>
+            <select
+              value={cycleKey}
+              onChange={(event) => setCycleKey(event.target.value)}
+              className={`${INPUT_BASE} [color-scheme:dark]`}
+            >
+              {viewedCycle ? (
+                <option value={viewedCycle.key}>
+                  Ciclo en pantalla: {viewedCycle.rangeLabel} / {viewedCycle.monthLabel}
+                </option>
+              ) : null}
+              {currentCycle && currentCycle.key !== viewedCycle?.key ? (
+                <option value={currentCycle.key}>Corte actual por vencer: {currentCycle.monthLabel}</option>
+              ) : null}
+              <option value={AUTO_CYCLE_KEY}>Automático (Aplicar a la deuda más antigua)</option>
+            </select>
+            {cycleKey === AUTO_CYCLE_KEY && oldestUnpaid ? (
+              <p className="mt-1.5 text-[11px] text-slate-500">
+                Cubriría primero {oldestUnpaid.monthLabel} ({formatMXN(oldestUnpaid.remaining)}).
+              </p>
+            ) : null}
+          </label>
+
+          <label className="block">
             <span className="mb-1.5 block text-xs font-medium text-slate-400">Nota (opcional)</span>
             <input
               type="text"
               value={notes}
               onChange={(event) => setNotes(event.target.value)}
-              className="w-full rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-emerald-400/50"
+              className={INPUT_BASE}
               placeholder='Ej. "Abono quincena"'
             />
           </label>
@@ -192,6 +261,7 @@ export default function AddPaymentModal({
                       <p className="text-sm font-semibold text-white">{formatMXN(payment.amount)}</p>
                       <p className="truncate text-[11px] text-slate-400">
                         {payment.date}
+                        {resolvePaymentCycleKey(payment) === AUTO_CYCLE_KEY ? " · Automático" : ""}
                         {payment.notes ? ` · ${payment.notes}` : ""}
                       </p>
                     </div>

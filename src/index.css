@@ -128,3 +128,25 @@ input[type="number"] {
     opacity: 1;
   }
 }
+
+.settle-flash {
+  animation: settle-flash 900ms ease-out;
+}
+
+@keyframes settle-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgb(52 211 153 / 0.55);
+  }
+  45% {
+    box-shadow: 0 0 28px 8px rgb(52 211 153 / 0.28);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgb(52 211 153 / 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settle-flash {
+    animation: none;
+  }
+}

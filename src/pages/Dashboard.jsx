@@ -295,6 +295,7 @@ export default function Dashboard() {
         income={monthIncome}
         onSaveIncome={saveIncome}
         loans={loans}
+        payments={payments}
       />
     );
   } else {

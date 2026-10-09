@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatShortDate } from "../../utils/cardDates";
-import { projectCardCycles } from "../../utils/cardStatement";
-import { applyPaymentsToProjections } from "../../utils/payments";
+import { buildAccountPaymentLedger, projectCardCycles } from "../../utils/cardStatement";
 import { formatMXN } from "../../utils/money";
 import MonthBreakdownModal from "./MonthBreakdownModal";
 
@@ -46,9 +45,26 @@ export default function PaymentTimeline({ account, expenses, payments = [], onBr
     () => projectCardCycles(account, expenses, horizon),
     [account, expenses, horizon]
   );
+  const ledger = useMemo(
+    () => buildAccountPaymentLedger(account, expenses, payments),
+    [account, expenses, payments]
+  );
   const cycles = useMemo(
-    () => applyPaymentsToProjections(rawProjections, payments, account.id),
-    [rawProjections, payments, account.id]
+    () =>
+      rawProjections.map((cycle) => {
+        const entry = ledger.byKey[cycle.monthKey];
+        if (!entry) return cycle;
+        return {
+          ...cycle,
+          ...entry,
+          items: entry.items,
+          gross: entry.gross,
+          paidAmount: entry.paidAmount,
+          total: entry.remaining,
+          settled: entry.settled,
+        };
+      }),
+    [rawProjections, ledger]
   );
 
   useEffect(() => {

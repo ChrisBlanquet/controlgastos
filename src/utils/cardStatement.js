@@ -1,6 +1,7 @@
 import {
   addCalendarDays,
   firstCutoffForPurchase,
+  formatDateRange,
   getCardCycle,
   getPaymentDueDate,
   parseLocalDate,
@@ -9,7 +10,7 @@ import {
 } from "./cardDates";
 import { formatMonthLabel, paidInstallments, remainingDebt } from "./expenses";
 import { roundMoney, toSafeNumber } from "./numbers";
-import { cycleMonthFromDate } from "./payments";
+import { applyPaymentsToLedger, cycleMonthFromDate } from "./payments";
 import { isExpensePaid } from "./projections";
 
 export function includesCutoffDayInCycle(card) {
@@ -303,6 +304,40 @@ export function statementItemsForCutoff(card, expenses = [], statementCutoff) {
     });
 
   return items;
+}
+
+export function listPaymentCycles(card, expenses = [], from = new Date()) {
+  const cutoffDay = card.cutoffDay;
+  const lastCutoff = getCardCycle(cutoffDay, card.paymentDueDays, from).lastCutoff;
+  const lastIndex = Math.max(1, lastCommitmentCycleIndex(card, expenses, from));
+  const cycles = [];
+
+  for (let offset = -18; offset <= lastIndex; offset += 1) {
+    const statementCutoff = shiftCutoffDate(lastCutoff, cutoffDay, offset);
+    const items = statementItemsForCutoff(card, expenses, statementCutoff);
+    const gross = roundMoney(items.reduce((sum, item) => sum + toSafeNumber(item.amount, 0), 0));
+    if (offset < 0 && gross <= 0) continue;
+    if (offset > 1 && gross <= 0) continue;
+
+    const monthKey = cycleMonthFromDate(statementCutoff);
+    const window = getStatementWindow(card, statementCutoff);
+    cycles.push({
+      offset,
+      monthKey,
+      statementCutoff,
+      label: formatMonthLabel(monthKey),
+      rangeLabel: formatDateRange(window.start, window.end),
+      items,
+      gross,
+      total: gross,
+    });
+  }
+
+  return cycles;
+}
+
+export function buildAccountPaymentLedger(account, expenses = [], payments = [], from = new Date()) {
+  return applyPaymentsToLedger(listPaymentCycles(account, expenses, from), payments, account.id);
 }
 
 export function getStatementWindow(card, statementCutoff) {

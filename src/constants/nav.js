@@ -5,5 +5,5 @@ export const NAV_ITEMS = [
   { id: "cards", label: "Mis Tarjetas", shortLabel: "Tarjetas", icon: CreditCard },
   { id: "loans", label: "Préstamos Personales", shortLabel: "Préstamos", icon: Landmark },
   { id: "income", label: "Sueldo e Ingresos", shortLabel: "Ingresos", icon: Wallet },
-  { id: "metrics", label: "Métricas y Proyecciones", shortLabel: "Métricas", icon: PieChart },
+  { id: "metrics", label: "Centro de decisión", shortLabel: "Decisión", icon: PieChart },
 ];
